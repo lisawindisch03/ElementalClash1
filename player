@@ -1,0 +1,240 @@
+from __future__ import annotations
+from typing import Any, Dict, List, Optional
+import random
+
+from creatures.base_creature import Creature
+from core.battle_calculator import BattleCalculator
+
+
+class Player:
+    def __init__(self, name: str, creatures: List[Creature], is_computer: bool = False) -> None:
+        if not isinstance(name, str) or not name or not isinstance(creatures, list) or not creatures:
+            raise ValueError
+        if not all(isinstance(c, Creature) for c in creatures):
+            raise ValueError 
+        
+        self.name = name
+        self.hp = 100
+        self.max_hp = 100
+        self.ep = 50
+        self.max_ep = 100
+        self.creatures = creatures
+        self.is_computer = is_computer
+        self.swap_used = False
+
+    def is_alive(self) -> bool:
+        return self.hp > 0 and self.has_creatures()
+        
+    def has_creatures(self) -> bool:
+        return len(self.get_alive_creatures()) >= 1
+            
+    def get_alive_creatures(self) -> List[Creature]:
+        return [creature for creature in self.creatures if creature.is_alive()]
+                
+    def take_damage(self, amount: int) -> int:
+        if not isinstance(amount, int) or amount < 0:
+            raise ValueError
+        self.hp = max(0, self.hp - amount)
+        return self.hp
+    
+    def use_energy(self, ep_cost: int) -> bool:
+        if not isinstance(ep_cost, int) or ep_cost < 0:
+            raise ValueError
+        
+        if ep_cost <= self.ep:
+            self.ep -= ep_cost
+            return True
+        return False
+        
+    def regenerate_energy(self, amount: int = 5) -> int:
+        if not isinstance(amount, int) or amount < 0:
+            raise ValueError
+        self.ep = min(self.max_ep, self.ep + amount)
+        return self.ep
+
+    def choose_creature(self, opponent_creature: Creature = None) -> Optional[Creature]:
+        alive_creatures = self.get_alive_creatures()
+        if not alive_creatures:
+            return None
+        if len(alive_creatures) == 1:
+            return alive_creatures[0]
+        
+        if self.is_computer:
+            return max(alive_creatures, key=lambda c: c.current_hp / c.max_hp)
+        
+        # Direct prompt for human player
+        print(f"\n{self.name}, choose your creature:")
+        for i, creature in enumerate(alive_creatures, 1):
+            print(f"  {i}. {creature.name} ({creature.element}) - HP: {creature.current_hp}/{creature.max_hp}")
+        
+        while True:
+            try:
+                choice = int(input(f"Enter choice (1-{len(alive_creatures)}): "))
+                if 1 <= choice <= len(alive_creatures):
+                    return alive_creatures[choice - 1]
+                print("Invalid choice. Please try again.")
+            except ValueError:
+                print("Please enter a valid number.")
+            
+    def choose_action(self, current_creature: Creature, opponent_creature: Creature = None, action_choice: int = None) -> Dict[str, Any]:
+        if not isinstance(current_creature, Creature):
+            raise ValueError
+        
+        if self.is_computer:
+            return self._ai_action(current_creature, opponent_creature)
+        
+        if action_choice is not None:
+            return self._execute_action(current_creature, action_choice)
+        
+        # Direct prompt for human player
+        available_actions = self._get_available_actions(current_creature)
+        
+        def describe(action: int) -> str:
+            if action == 1:
+                return "Basic Attack - Deal damage based on attack stat"
+            if action == 2 and current_creature.abilities:
+                ability = current_creature.abilities[0]
+                return f"Ability 1: {ability.name} ({ability.ep_cost} EP) - {ability.description}"
+            if action == 3 and len(current_creature.abilities) > 1:
+                ability = current_creature.abilities[1]
+                return f"Ability 2: {ability.name} ({ability.ep_cost} EP) - {ability.description}"
+            if action == 4:
+                return "Defend - Reduce incoming damage by 50% this turn"
+            return "Unknown"
+        
+        print(f"\n{self.name}, choose action for {current_creature.name} (EP: {self.ep}):")
+        for action in sorted(available_actions):
+            print(f"  {action}. {describe(action)}")
+        
+        prompt = ", ".join(map(str, sorted(available_actions)))
+        while True:
+            try:
+                choice = int(input(f"Enter choice ({prompt}): "))
+                if choice in available_actions:
+                    return self._execute_action(current_creature, choice)
+                print(f"Invalid choice. Please choose from {sorted(available_actions)}.")
+            except ValueError:
+                print("Please enter a valid number.")
+
+    def _execute_action(self, current_creature: Creature, action: int) -> Dict[str, Any]:
+        if not self.validate_action(action, current_creature)["valid"]:
+            action = 1
+        
+        action_types = {1: "basic_attack", 2: "ability_1", 3: "ability_2", 4: "defend"}
+        descriptions = {
+            1: "Basic Attack - Deal damage based on attack stat",
+            2: f"Use Ability 1 - {current_creature.abilities[0].name if current_creature.abilities else 'N/A'}",
+            3: f"Use Ability 2 - {current_creature.abilities[1].name if len(current_creature.abilities) > 1 else 'N/A'}",
+            4: "Defend - Reduce incoming damage by 50% this turn"
+        }
+        
+        ability_data = None
+        if action in [2, 3] and len(current_creature.abilities) >= action - 1:
+            ability = current_creature.abilities[action - 2]
+            self.use_energy(ability.ep_cost)
+            ability_data = {"ability": ability, "needs_target": True}
+        
+        return {
+            "action": action,
+            "action_type": action_types.get(action, "basic_attack"),
+            "creature": current_creature,
+            "player": self,
+            "description": descriptions.get(action, "Basic Attack"),
+            "ability_data": ability_data
+        }
+
+    # Feature 1
+    def swap_creature(self, creature_index: int) -> Dict[str, Any]:
+        if self.swap_used:
+            return {"success": False, "message": "Creature swap already used"}
+        if not (0 <= creature_index < len(self.creatures)):
+            return {"success": False, "message": "Invalid creature index"}
+        
+        from core.creature_factory import CreatureFactory
+        new_creature = CreatureFactory.create_random_hand(1)
+        if not new_creature:
+            return {"success": False, "message": "Failed to create new creature"}
+        
+        old_creature = self.creatures[creature_index]
+        self.creatures[creature_index] = new_creature[0]
+        self.swap_used = True
+        return {
+            "success": True,
+            "old_creature": old_creature,
+            "new_creature": new_creature[0],
+            "message": f"Swapped {old_creature.name} for {new_creature[0].name}"
+        }
+
+    #Feature 2
+    def _ai_action(self, current_creature: Creature, opponent_creature: Creature) -> Dict[str, Any]:
+        if opponent_creature:
+            action = BattleCalculator.choose_smart_action(
+                current_creature, opponent_creature, self.ep, self.hp / self.max_hp
+            )["action"]
+        else:
+            available_actions = [1]
+            if current_creature.abilities and self.ep >= current_creature.abilities[0].ep_cost:
+                available_actions.append(2)
+            if len(current_creature.abilities) > 1 and self.ep >= current_creature.abilities[1].ep_cost:
+                available_actions.append(3)
+            if current_creature.current_hp < current_creature.max_hp * 0.4:
+                available_actions.append(4)
+            action = random.choice(available_actions)
+        return self._execute_action(current_creature, action)
+    
+    def _get_available_actions(self, current_creature: Creature) -> List[int]:
+        available_actions = [1, 4]
+        if current_creature.abilities and self.ep >= current_creature.abilities[0].ep_cost:
+            available_actions.append(2)
+        if len(current_creature.abilities) > 1 and self.ep >= current_creature.abilities[1].ep_cost:
+            available_actions.append(3)
+        return sorted(available_actions)
+    
+    def validate_action(self, action: int, current_creature: Creature) -> Dict[str, Any]:
+        if not isinstance(action, int) or action < 1 or action > 4:
+            return {"valid": False, "reason": "Action must be 1-4"}
+        
+        # Attack or Defend
+        if action == 1 or action == 4:
+            return {"valid": True, "reason": "Always available"}
+        
+        # Check abilities
+        ability_index = action - 2
+        if len(current_creature.abilities) <= ability_index:
+            return {"valid": False, "reason": f"No ability {action - 1}"}
+        
+        ability = current_creature.abilities[ability_index]
+        if self.ep < ability.ep_cost:
+            return {"valid": False, "reason": f"Not enough EP (need {ability.ep_cost}, have {self.ep})"}
+        
+        return {"valid": True, "reason": f"Can use {ability.name}"}
+    
+    def can_swap_creature(self) -> bool:
+        return not self.swap_used
+    
+    # Additional for UI
+    def get_status(self) -> Dict[str, Any]:
+        alive_creatures = self.get_alive_creatures()
+        return {
+            "name": self.name,
+            "hp": self.hp,
+            "max_hp": self.max_hp,
+            "ep": self.ep,
+            "max_ep": self.max_ep,
+            "is_computer": self.is_computer,
+            "is_alive": self.is_alive(),
+            "total_creatures": len(self.creatures),
+            "alive_creatures": len(alive_creatures),
+            "swap_used": self.swap_used,
+            "can_swap": self.can_swap_creature(),
+            "creatures": [
+                {
+                    "name": creature.name,
+                    "element": creature.element,
+                    "current_hp": creature.current_hp,
+                    "max_hp": creature.max_hp,
+                    "is_alive": creature.is_alive()
+                }
+                for creature in self.creatures
+            ]
+        }
